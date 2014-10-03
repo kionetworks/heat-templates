@@ -1,0 +1,11 @@
+heat_template_version: 2013-05-23
+
+description: I just want to deploy a compute instance and nothing else...
+
+resources:
+ the_instance:
+ type: OS::Nova::Server
+ properties:
+ key_name: fjaraya_key
+ image: Debian7.4-x86_64-cfntools
+ flavor: green

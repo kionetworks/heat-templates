@@ -1,0 +1,195 @@
+heat_template_version: 2013-05-23
+
+description: >
+  Demo template
+
+parameters:
+  flavor:
+    type: string
+    description: Flavor de las instancias
+    default: Green
+    constraints:
+      - allowed_values: [Green, Blue, Red, Orange, Yellow, Black, Gold ]
+        description: Flavor debe ser Green, Blue, Red, Orange, Yellow, Black o Gold
+  image:
+    type: string
+    description: Imagen a utilizar
+    default: centos6.4_64
+    constraints:
+      - allowed_values: [ centos6.4_64 ]
+        description: >
+          Image debe ser centos6.4_64
+  db_name:
+    type: string
+    description: Nombre de la base de datos de Wordpress
+    default: wordpress
+    constraints:
+      - length: { min: 1, max: 64 }
+        description: db_name debe ser de entre 1 y 64 caracteres
+      - allowed_pattern: '[a-zA-Z][a-zA-Z0-9]*'
+        description: >
+          db_name debe comenzar con una letra y contener solo caracteres alfanumericos
+  db_username:
+    type: string
+    description: Usuario de la base de datos de Wordpress
+    default: admin
+    hidden: true
+    constraints:
+      - length: { min: 1, max: 16 }
+        description: db_username debe ser de entre 1 y 64 caracteres
+      - allowed_pattern: '[a-zA-Z][a-zA-Z0-9]*'
+        description: >
+          db_username debe comenzar con una letra y contener solo caracteres alfanumericos
+  db_password:
+    type: string
+    description: Password de la base de datos de Wordpress
+    default: HackMePlease
+    hidden: true
+    constraints:
+      - length: { min: 1, max: 41 }
+        description: db_password debe ser de entre 1 y 64 caracteres
+      - allowed_pattern: '[a-zA-Z0-9]*'
+        description: db_password debe contener solo caracteres alfanumericos
+  db_root_password:
+    type: string
+    description: Password de root de MySQL
+    default: HackMeAgainPlease
+    hidden: true
+    constraints:
+      - length: { min: 1, max: 41 }
+        description: db_root_password debe ser de entre 1 y 64 caracteres
+      - allowed_pattern: '[a-zA-Z0-9]*'
+        description: db_root_password debe contener solo caracteres alfanumericos
+  public_net_id:
+    type: string
+    description: >
+      ID de la red publica
+    default: 4957e2e8-1cac-41e1-a431-63e7e8c02298
+  private_net_name:
+    type: string
+    description: Nombre de la red privada a crear
+  private_net_cidr:
+    type: string
+    description: Direccion de la red privada (notacion CIDR)
+  private_net_gateway:
+    type: string
+    description: Dirección del gateway privado
+  private_net_pool_start:
+    type: string
+    description: Inicio del pool de IPs para la red privada
+  private_net_pool_end:
+    type: string
+    description: Fin del pool de IPs para la red privada
+
+resources:
+  private_net:
+    type: OS::Neutron::Net
+    properties:
+      name: { get_param: private_net_name }
+
+  private_subnet:
+    type: OS::Neutron::Subnet
+    properties:
+      network_id: { get_resource: private_net }
+      cidr: { get_param: private_net_cidr }
+      gateway_ip: { get_param: private_net_gateway }
+      allocation_pools:
+        - start: { get_param: private_net_pool_start }
+          end: { get_param: private_net_pool_end }
+
+  router:
+    type: OS::Neutron::Router
+
+  router_gateway:
+    type: OS::Neutron::RouterGateway
+    properties:
+      router_id: { get_resource: router }
+      network_id: { get_param: public_net_id }
+
+  router_interface:
+    type: OS::Neutron::RouterInterface
+    properties:
+      router_id: { get_resource: router }
+      subnet_id: { get_resource: private_subnet }
+
+  wordpress_instance:
+    type: OS::Nova::Server
+    properties:
+      image: { get_param: image }
+      flavor: { get_param: flavor }
+      networks:
+        - port: { get_resource: wordpress_instance_port }
+      user_data:
+        str_replace:
+          template: |
+            #!/bin/bash -v
+
+            yum -y install mysql mysql-server httpd wordpress
+            chkconfig mysqld on
+            chkconfig httpd on
+            service mysqld start
+            service httpd start
+
+            iptables -I INPUT 5 -p tcp -m state --state NEW -m tcp --dport 80 -j ACCEPT
+            iptables-save > /etc/sysconfig/iptables
+            service iptables restart
+
+            # Setup MySQL root password and create a user
+            mysqladmin -u root password db_rootpassword
+            cat << EOF | mysql -u root --password=db_rootpassword
+            CREATE DATABASE db_name;
+            GRANT ALL PRIVILEGES ON db_name.* TO "db_user"@"localhost"
+            IDENTIFIED BY "db_password";
+            FLUSH PRIVILEGES;
+            EXIT
+            EOF
+
+            sed -i "/Deny from All/d" /etc/httpd/conf.d/wordpress.conf
+            sed -i "s/Require local/Require all granted/" /etc/httpd/conf.d/wordpress.conf
+            sed -i s/database_name_here/db_name/ /etc/wordpress/wp-config.php
+            sed -i s/username_here/db_user/ /etc/wordpress/wp-config.php
+            sed -i s/password_here/db_password/ /etc/wordpress/wp-config.php
+
+            service httpd restart
+          params:
+            db_rootpassword: { get_param: db_root_password }
+            db_name: { get_param: db_name }
+            db_user: { get_param: db_username }
+            db_password: { get_param: db_password }
+
+  wordpress_instance_port:
+    type: OS::Neutron::Port
+    properties:
+      network_id: { get_resource: private_net }
+      fixed_ips:
+        - subnet_id: { get_resource: private_subnet }
+
+  wordpress_instance_floating_ip:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network_id: { get_param: public_net_id }
+      port_id: { get_resource: wordpress_instance_port }
+
+  mysql_instance:
+    type: OS::Nova::Server
+    properties:
+      image: { get_param: image }
+      flavor: { get_param: flavor }
+      networks:
+        - port: { get_resource: mysql_instance_port }
+
+  mysql_instance_port:
+    type: OS::Neutron::Port
+    properties:
+      network_id: { get_resource: private_net }
+      fixed_ips:
+        - subnet_id: { get_resource: private_subnet }
+
+outputs:
+  WebsiteURL:
+    description: Abrir Wordpress
+    value:
+      str_replace:
+        template: http://host/wordpress
+        params:
+          host: { get_attr: [wordpress_instance_floating_ip, floating_ip_address] }

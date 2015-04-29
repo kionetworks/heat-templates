@@ -1,0 +1,169 @@
+heat_template_version: 2013-05-23
+
+description: >
+  Deploys a new Active Directory domain controller.
+
+parameters:
+
+  flavor:
+    description: Flavor of the instance
+    label: Flavor 
+    type: string
+    default: Orange
+    constraints:
+      - allowed_values: [Orange, Red]
+
+  image:
+    default: windows_2012_STD_64_EVA
+    label: Windows image
+    description: Windows image version of choice
+    type: string
+    constraints:
+      - allowed_values: [ windows_2012_STD_64_EVA ]
+        description: must be a valid Windows image
+
+  public_net_id:
+    type: string
+    description: >
+      ID of the public network
+    default: 4957e2e8-1cac-41e1-a431-63e7e8c02298
+
+  private_net_name:
+    type: string
+    description: Name of the private nwtwork to create
+    default: addc_net
+
+  private_net_cidr:
+    type: string
+    description: Private network in CIDR format
+    default: 172.17.1.0/24
+
+  private_net_gateway:
+    type: string
+    description: Private gateway
+    default: 172.17.1.254
+
+  private_net_pool_start:
+    type: string
+    description: Start of the IP pool for the private network
+    default: 172.17.1.10
+
+  private_net_pool_end:
+    type: string
+    description: End of the IP pool for the private network
+    default: 172.17.1.30
+
+  availability_zone:
+    default: comp11
+    type: string
+    label: Availability zone
+    description: Availability zone
+
+  domain_name:
+    default: TESTHEAT.local
+    description: The domain name
+    label: Domain Name
+    type: string
+    constraints:
+      - length: { min: 3, max: 256 }
+      - allowed_pattern: "[A-Za-z0-9]+(?=[\\.\\-][a-zA-Z0-9])*\\.[a-zA-z09]+"
+        description : must be a valid DNS name.
+
+  domain_netbios_name:
+    default: TESTHEAT
+    description: The Netbios domain name
+    type: string
+    label: Domain Netbios Name
+    constraints:
+      - length: { min: 1, max: 15 }
+      - allowed_pattern: "[a-zA-Z][a-zA-Z0-9]*"
+        description: must begin with a letter and contain only alphanumeric characters.
+
+  safe_mode_administrator_password:
+    default: service_password
+    description: The safe mode administration password
+    type: string
+    label: Administrator Password
+    constraints:
+      - length: { min: 8, max: 64 }
+      - allowed_pattern: "(?=^.{6,255}$)((?=.*\\d)(?=.*[A-Z])(?=.*[a-z])|(?=.*\\d)(?=.*[^A-Za-z0-9])(?=.*[a-z])|(?=.*[^A-Za-z0-9])(?=.*[A-Z])(?=.*[a-z])|(?=.*\\d)(?=.*[A-Z])(?=.*[^A-Za-z0-9]))^.*"
+        description: must contain letters numbers and symbols
+
+resources:
+
+  # this ports are not valid, they are just an example
+  security_group:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      name: addc_security_group
+      rules:
+        - protocol: tcp
+          port_range_min: 6969
+          port_range_max: 7979
+
+  private_net:
+    type: OS::Neutron::Net
+    properties:
+      name: { get_param: private_net_name }
+
+  private_subnet:
+    type: OS::Neutron::Subnet
+    properties:
+      network_id: { get_resource: private_net }
+      cidr: { get_param: private_net_cidr }
+      gateway_ip: { get_param: private_net_gateway }
+      allocation_pools:
+        - start: { get_param: private_net_pool_start }
+          end: { get_param: private_net_pool_end }
+
+  router:
+    type: OS::Neutron::Router
+
+  router_gateway:
+    type: OS::Neutron::RouterGateway
+    properties:
+      router_id: { get_resource: router }
+      network_id: { get_param: public_net_id }
+
+  router_interface:
+    type: OS::Neutron::RouterInterface
+    properties:
+      router_id: { get_resource: router }
+      subnet_id: { get_resource: private_subnet }
+
+  dc:
+    type: OS::Nova::Server
+    properties:
+      image: { get_param: image }
+      flavor: { get_param: flavor }
+      availability_zone: { get_param: availability_zone}
+      networks:
+        - port: { get_resource: dc_instance_port }
+      user_data:
+        str_replace:
+          template: |
+            #ps1_sysnative
+            $ErrorActionPreference = 'Stop'
+            Install-WindowsFeature -Name AD-Domain-Services -IncludeManagementTools
+            $user = [ADSI]'WinNT://./Administrator'
+            # Disable user
+            #$user.userflags = 2
+            #$user.SetInfo()
+            $user.SetPassword('safe_mode_administrator_password')
+            Import-Module ADDSDeployment
+            $safeModePwd = (ConvertTo-SecureString 'safe_mode_administrator_password' -AsPlainText -Force)
+            Install-ADDSForest -DomainName 'domain_name' -DomainNetbiosName 'domain_netbios_name' -SafeModeAdministratorPassword $safeModePwd -InstallDns -NoRebootOnCompletion -Force
+            exit 1001
+          params:
+            safe_mode_administrator_password: { get_param: safe_mode_administrator_password }
+            domain_name: { get_param: domain_name }
+            domain_netbios_name: { get_param: domain_netbios_name }
+
+  dc_instance_port:
+     type: OS::Neutron::Port
+     properties:
+       network_id: { get_resource: private_net }
+       security_groups: [ addc_security_group ]
+       fixed_ips:
+         - subnet_id: {get_resource: private_subnet }
+         - ip_address: 172.17.1.29
